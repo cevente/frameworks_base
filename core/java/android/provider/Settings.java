@@ -14031,6 +14031,27 @@ public final class Settings {
         public static final String HIDE_DEVELOPER_STATUS = "hide_developer_status";
 
         /**
+         * Pulse lockscreen music visualizer
+         * @hide
+         */
+        public static final String LOCKSCREEN_PULSE_ENABLED = "lockscreen_pulse_enabled";
+
+        /**
+         * @hide
+         */
+        public static final String PULSE_BAR_COUNT = "pulse_bar_count";
+
+        /**
+         * @hide
+         */
+        public static final String PULSE_ROUNDED_BARS = "pulse_rounded_bars";
+
+        /**
+         * @hide
+         */
+        public static final String PULSE_COLOR = "pulse_color";
+
+        /**
          * Keys we no longer back up under the current schema, but want to continue to
          * process when restoring historical backup datasets.
          *
