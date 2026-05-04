@@ -418,11 +418,12 @@ public class CentralSurfacesImpl implements CoreStartable, CentralSurfaces,
     private final UserTracker mUserTracker;
     private final TunerService mTunerService;
     private final ActivityStarter mActivityStarter;
-    private final MediaViewController mMediaViewController;
     private final PulseViewController mPulseViewController;
     private final EdgeLightViewController mEdgeLightViewController;
 
     private final DisplayMetrics mDisplayMetrics;
+
+    private MediaViewController mMediaViewController;
 
     // XXX: gesture research
     private final GestureRecorder mGestureRec = DEBUG_GESTURES
@@ -496,6 +497,8 @@ public class CentralSurfacesImpl implements CoreStartable, CentralSurfaces,
         // Trigger an update for the scrim state when we enter or exit glanceable hub, so that we
         // can transition to/from ScrimState.GLANCEABLE_HUB if needed.
         updateScrimController();
+
+        mMediaViewController.onGlanceableHubShowingChanged(idleOnCommunal);
     };
 
     private final SysuiStatusBarStateController mStatusBarStateController;
