@@ -15,9 +15,14 @@
  */
 
 #include <math.h>
+#include <algorithm>
+#include <android/log.h>
 
 #include "Blur.h"
 #include "MathUtils.h"
+
+#define LOG_TAG "Blur"
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 
 namespace android {
 namespace uirenderer {
@@ -27,22 +32,35 @@ namespace uirenderer {
 static const float BLUR_SIGMA_SCALE = 0.57735f;
 
 float Blur::convertRadiusToSigma(float radius) {
-    return radius > 0 ? BLUR_SIGMA_SCALE * radius + 0.5f : 0.0f;
+    // Apply hardware cap to prevent CPU overload
+    float safeRadius = clampRadius(radius);
+    if (radius > MAX_SAFE_RADIUS) {
+        LOGD("convertRadiusToSigma: Capping radius %.2f -> %.2f", radius, safeRadius);
+    }
+    return safeRadius > 0 ? BLUR_SIGMA_SCALE * safeRadius + 0.5f : 0.0f;
 }
 
 float Blur::convertSigmaToRadius(float sigma) {
-    return sigma > 0.5f ? (sigma - 0.5f) / BLUR_SIGMA_SCALE : 0.0f;
+    // Apply hardware cap
+    float safeSigma = clampSigma(sigma);
+    if (sigma > MAX_SAFE_SIGMA) {
+        LOGD("convertSigmaToRadius: Capping sigma %.2f -> %.2f", sigma, safeSigma);
+    }
+    return safeSigma > 0.5f ? (safeSigma - 0.5f) / BLUR_SIGMA_SCALE : 0.0f;
 }
 
-// if the original radius was on an integer boundary and the resulting radius
-// is within the conversion error tolerance then we attempt to snap to the
-// original integer boundary.
 uint32_t Blur::convertRadiusToInt(float radius) {
-    const float radiusCeil = ceilf(radius);
-    if (MathUtils::areEqual(radiusCeil, radius)) {
-        return radiusCeil;
+    // Apply hardware cap first
+    float safeRadius = clampRadius(radius);
+    if (radius > MAX_SAFE_RADIUS) {
+        LOGD("convertRadiusToInt: Capping radius %.2f -> %.2f", radius, safeRadius);
     }
-    return radius;
+    
+    const float radiusCeil = ceilf(safeRadius);
+    if (MathUtils::areEqual(radiusCeil, safeRadius)) {
+        return static_cast<uint32_t>(radiusCeil);
+    }
+    return static_cast<uint32_t>(safeRadius);
 }
 
 /**
@@ -55,7 +73,9 @@ uint32_t Blur::convertRadiusToInt(float radius) {
  * large sigma the gaussian curve begins to lose its shape.
  */
 static float legacyConvertRadiusToSigma(float radius) {
-    return radius > 0 ? 0.3f * radius + 0.6f : 0.0f;
+    // Apply hardware cap in the legacy conversion too
+    float safeRadius = Blur::clampRadius(radius);
+    return safeRadius > 0 ? 0.3f * safeRadius + 0.6f : 0.0f;
 }
 
 void Blur::generateGaussianWeights(float* weights, float radius) {
