@@ -19,10 +19,13 @@
 #include <SkColorSpace.h>
 #include <SkMaskFilter.h>
 #include <algorithm>
-#include <android/log.h>
+#include <utils/Log.h>
 
-#define LOG_TAG "BlurDrawLooper"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOG_NDEBUG 0  // Enable logging in debug builds
+
+#ifndef ALOGV_IF
+#define ALOGV_IF(...) ((void)0)
+#endif
 
 namespace android {
 
@@ -31,8 +34,8 @@ BlurDrawLooper::BlurDrawLooper(SkColor4f color, float blurSigma, SkPoint offset)
           mBlurSigma(std::min(blurSigma, MAX_SAFE_SIGMA)),  // Cap at construction
           mOffset(offset) {
     if (blurSigma > MAX_SAFE_SIGMA) {
-        LOGD("Capping blur sigma: %.2f -> %.2f (max: %.2f)", 
-             blurSigma, mBlurSigma, MAX_SAFE_SIGMA);
+        ALOGD("BlurDrawLooper: Capping blur sigma: %.2f -> %.2f (max: %.2f)", 
+              blurSigma, mBlurSigma, MAX_SAFE_SIGMA);
     }
 }
 
@@ -61,7 +64,7 @@ sk_sp<BlurDrawLooper> BlurDrawLooper::Make(SkColor4f color, SkColorSpace* cs, fl
     // Apply cap during construction
     float cappedSigma = std::min(blurSigma, MAX_SAFE_SIGMA);
     if (blurSigma > MAX_SAFE_SIGMA) {
-        LOGD("Make(): Capping blur sigma: %.2f -> %.2f", blurSigma, cappedSigma);
+        ALOGD("BlurDrawLooper::Make(): Capping blur sigma: %.2f -> %.2f", blurSigma, cappedSigma);
     }
     
     return sk_sp<BlurDrawLooper>(new BlurDrawLooper(color, cappedSigma, offset));
