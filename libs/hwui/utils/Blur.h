@@ -25,6 +25,10 @@ namespace uirenderer {
 
 class Blur {
 public:
+    // SD685 safe limits - prevent CPU overload in software rendering
+    static constexpr float MAX_SAFE_RADIUS = 15.0f;
+    static constexpr float MAX_SAFE_SIGMA = 8.0f;
+    
     // If radius > 0, return the corresponding sigma, else return 0
     static float convertRadiusToSigma(float radius);
     // If sigma > 0.5, return the corresponding radius, else return 0
@@ -33,6 +37,17 @@ public:
     // radius conversion a small rounding error may be introduced. This function
     // accounts for that error and snaps to the appropriate integer boundary.
     static uint32_t convertRadiusToInt(float radius);
+    
+    // Helper functions to clamp values to safe limits
+    static float clampRadius(float radius) {
+        return (radius > MAX_SAFE_RADIUS) ? MAX_SAFE_RADIUS : 
+               (radius < 0 ? 0 : radius);
+    }
+    
+    static float clampSigma(float sigma) {
+        return (sigma > MAX_SAFE_SIGMA) ? MAX_SAFE_SIGMA : 
+               (sigma < 0 ? 0 : sigma);
+    }
 
     static void generateGaussianWeights(float* weights, float radius);
     static void horizontal(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
