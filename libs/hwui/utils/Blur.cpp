@@ -16,13 +16,16 @@
 
 #include <math.h>
 #include <algorithm>
-#include <android/log.h>
+#include <utils/Log.h>
 
 #include "Blur.h"
 #include "MathUtils.h"
 
-#define LOG_TAG "Blur"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
+#define LOG_NDEBUG 0  // Enable logging in debug builds
+
+#ifndef ALOGV_IF
+#define ALOGV_IF(...) ((void)0)
+#endif
 
 namespace android {
 namespace uirenderer {
@@ -35,7 +38,7 @@ float Blur::convertRadiusToSigma(float radius) {
     // Apply hardware cap to prevent CPU overload
     float safeRadius = clampRadius(radius);
     if (radius > MAX_SAFE_RADIUS) {
-        LOGD("convertRadiusToSigma: Capping radius %.2f -> %.2f", radius, safeRadius);
+        ALOGD("Blur::convertRadiusToSigma: Capping radius %.2f -> %.2f", radius, safeRadius);
     }
     return safeRadius > 0 ? BLUR_SIGMA_SCALE * safeRadius + 0.5f : 0.0f;
 }
@@ -44,7 +47,7 @@ float Blur::convertSigmaToRadius(float sigma) {
     // Apply hardware cap
     float safeSigma = clampSigma(sigma);
     if (sigma > MAX_SAFE_SIGMA) {
-        LOGD("convertSigmaToRadius: Capping sigma %.2f -> %.2f", sigma, safeSigma);
+        ALOGD("Blur::convertSigmaToRadius: Capping sigma %.2f -> %.2f", sigma, safeSigma);
     }
     return safeSigma > 0.5f ? (safeSigma - 0.5f) / BLUR_SIGMA_SCALE : 0.0f;
 }
@@ -53,7 +56,7 @@ uint32_t Blur::convertRadiusToInt(float radius) {
     // Apply hardware cap first
     float safeRadius = clampRadius(radius);
     if (radius > MAX_SAFE_RADIUS) {
-        LOGD("convertRadiusToInt: Capping radius %.2f -> %.2f", radius, safeRadius);
+        ALOGD("Blur::convertRadiusToInt: Capping radius %.2f -> %.2f", radius, safeRadius);
     }
     
     const float radiusCeil = ceilf(safeRadius);
