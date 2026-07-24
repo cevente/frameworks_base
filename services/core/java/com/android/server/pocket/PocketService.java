@@ -127,7 +127,17 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
      */
     private static final float POCKET_LIGHT_MAX_THRESHOLD = 3.0f;
 
-    private final ArrayList<IPocketCallback> mCallbacks= new ArrayList<>();
+    /**
+     * Minimum time between callbacks to prevent sensor reconfiguration spam
+     */
+    private static final long MIN_CALLBACK_INTERVAL_MS = 1000; // 1 second minimum between callbacks
+
+    /**
+     * Maximum time sensors can run before forced unregistration
+     */
+    private static final long MAX_SENSOR_RUN_TIME = 60000; // 1 minute max
+
+    private final ArrayList<IPocketCallback> mCallbacks = new ArrayList<>();
 
     private Context mContext;
     private boolean mEnabled;
@@ -164,6 +174,11 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     // Custom methods
     private boolean mPocketLockVisible;
     private boolean mSupportedByDevice;
+
+    // Debounce and state tracking
+    private long mLastCallbackTime = 0;
+    private boolean mCallbackPending = false;
+    private boolean mLastKnownPocketState = false;
 
     public PocketService(Context context) {
         super(context);
@@ -320,22 +335,32 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     public void binderDied() {
         synchronized (mCallbacks) {
             mProximityState = PROXIMITY_UNKNOWN;
+            mLightState = LIGHT_UNKNOWN;
+            mVendorSensorState = VENDOR_SENSOR_UNKNOWN;
+            
             int callbacksSize = mCallbacks.size();
             for (int i = callbacksSize - 1; i >= 0; i--) {
-                if (mCallbacks.get(i) != null) {
+                IPocketCallback callback = mCallbacks.get(i);
+                if (callback != null) {
                     try {
-                        mCallbacks.get(i).onStateChanged(false, PocketManager.REASON_RESET);
+                        callback.onStateChanged(false, PocketManager.REASON_RESET);
                     } catch (DeadObjectException e) {
                         Slog.w(TAG, "Death object while invoking sendPocketState: ", e);
                     } catch (RemoteException e) {
                         Slog.w(TAG, "Failed to invoke sendPocketState: ", e);
+                    } catch (Exception e) {
+                        Slog.w(TAG, "Unexpected error in binderDied: ", e);
                     }
                 }
             }
             mCallbacks.clear();
         }
         unregisterSensorListeners();
-        mObserver.unregister();
+        try {
+            mObserver.unregister();
+        } catch (Exception e) {
+            Slog.w(TAG, "Error unregistering observer: ", e);
+        }
     }
 
     private final class PocketServiceWrapper extends IPocketService.Stub {
@@ -466,19 +491,23 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     };
 
     private boolean isDeviceInPocket() {
-        if (!mSupportedByDevice){
+        if (!mSupportedByDevice) {
             return false;
         }
 
-        if (mVendorSensorState != VENDOR_SENSOR_UNKNOWN) {
+        // If we have vendor sensor, use it (but handle null case)
+        if (mVendorSensor != null && mVendorSensorState != VENDOR_SENSOR_UNKNOWN) {
             return mVendorSensorState == VENDOR_SENSOR_IN_POCKET;
         }
 
-        if (mLightState != LIGHT_UNKNOWN) {
-            return mProximityState == PROXIMITY_POSITIVE
+        // If no vendor sensor, use proximity + light
+        if (mLightSensor != null && mLightState != LIGHT_UNKNOWN) {
+            return (mProximitySensor != null && mProximityState == PROXIMITY_POSITIVE)
                     && mLightState == LIGHT_POCKET;
         }
-        return mProximityState == PROXIMITY_POSITIVE;
+        
+        // Fallback to proximity only
+        return mProximitySensor != null && mProximityState == PROXIMITY_POSITIVE;
     }
 
     private void setEnabled(boolean enabled) {
@@ -493,20 +522,23 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     }
 
     private void update() {
-        if (!mSupportedByDevice){
+        if (!mSupportedByDevice) {
             return;
         }
+        
         if (!mEnabled || mInteractive) {
-            if (mEnabled && isDeviceInPocket()) {
-                // if device is judged to be in pocket while switching
-                // to interactive state, we need to keep monitoring.
-                return;
-            }
+            // Immediately unregister sensors when device is interactive or disabled
+            mHandler.removeCallbacksAndMessages(null);
             unregisterSensorListeners();
-        } else {
-            mHandler.removeMessages(PocketHandler.MSG_UNREGISTER_TIMEOUT);
-            registerSensorListeners();
+            return;
         }
+        
+        // Device is non-interactive and pocket mode is enabled
+        mHandler.removeMessages(PocketHandler.MSG_UNREGISTER_TIMEOUT);
+        registerSensorListeners();
+        
+        // Set a timeout to prevent sensors from running forever
+        mHandler.sendEmptyMessageDelayed(PocketHandler.MSG_UNREGISTER_TIMEOUT, MAX_SENSOR_RUN_TIME);
     }
 
     private void registerSensorListeners() {
@@ -525,6 +557,10 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
         stopListeningForVendorSensor();
         stopListeningForProximity();
         stopListeningForLight();
+        
+        // Reset callback debounce
+        mLastCallbackTime = 0;
+        mCallbackPending = false;
     }
 
     private void startListeningForVendorSensor() {
@@ -533,14 +569,21 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
         }
 
         if (mVendorSensor == null) {
-            Log.d(TAG, "Cannot detect Vendor pocket sensor, sensor is NULL");
+            if (DEBUG) {
+                Log.d(TAG, "Vendor pocket sensor not available, using fallback sensors");
+            }
             return;
         }
 
         if (!mVendorSensorRegistered) {
-            mSensorManager.registerListener(mVendorSensorListener, mVendorSensor,
-                    SensorManager.SENSOR_DELAY_NORMAL, mHandler);
-            mVendorSensorRegistered = true;
+            try {
+                mSensorManager.registerListener(mVendorSensorListener, mVendorSensor,
+                        SensorManager.SENSOR_DELAY_NORMAL, mHandler);
+                mVendorSensorRegistered = true;
+            } catch (Exception e) {
+                Slog.e(TAG, "Failed to register vendor sensor: ", e);
+                mVendorSensorRegistered = false;
+            }
         }
     }
 
@@ -557,7 +600,6 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     }
 
     private void startListeningForProximity() {
-
         if (mVendorSensor != null) {
             return;
         }
@@ -576,15 +618,24 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
         }
 
         if (!mProximityRegistered) {
+            // Use a consistent delay and add batching to reduce wakeups
+            final int sensorDelay = PROXIMITY_SENSOR_DELAY;
+            final int batchLatency = sensorDelay * 5; // 2 seconds of batching
+            
+            if (DEBUG) {
+                Log.d(TAG, "Registering proximity sensor with delay=" + sensorDelay 
+                        + ", batchLatency=" + batchLatency);
+            }
+            
             mSensorManager.registerListener(mProximityListener, mProximitySensor,
-                    PROXIMITY_SENSOR_DELAY, mHandler);
+                    sensorDelay, batchLatency, mHandler);
             mProximityRegistered = true;
         }
     }
 
     private void stopListeningForProximity() {
         if (DEBUG) {
-            Log.d(TAG, "startListeningForProximity()");
+            Log.d(TAG, "stopListeningForProximity()");
         }
 
         if (mProximityRegistered) {
@@ -616,8 +667,11 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
         }
 
         if (!mLightRegistered) {
+            final int sensorDelay = LIGHT_SENSOR_DELAY;
+            final int batchLatency = sensorDelay * 5; // 2 seconds of batching
+            
             mSensorManager.registerListener(mLightListener, mLightSensor,
-                    LIGHT_SENSOR_DELAY, mHandler);
+                    sensorDelay, batchLatency, mHandler);
             mLightRegistered = true;
         }
     }
@@ -655,6 +709,11 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
             Log.d(TAG, "onBootPhase(): PHASE_BOOT_COMPLETED");
         }
         mSystemBooted = true;
+        
+        // Force unregister all sensors on boot complete
+        // This prevents sensors from holding wakelocks during boot
+        unregisterSensorListeners();
+        
         if (mPending) {
             final Message msg = new Message();
             msg.what = PocketHandler.MSG_INTERACTIVE_CHANGED;
@@ -665,21 +724,42 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
     }
 
     private void handleDispatchCallbacks() {
+        // Don't dispatch if we're already processing a pending callback
+        if (mCallbackPending) {
+            return;
+        }
+        
         synchronized (mCallbacks) {
             final int N = mCallbacks.size();
             boolean cleanup = false;
+            final boolean isInPocket = isDeviceInPocket();
+            
+            // If no callbacks, just return
+            if (N == 0) {
+                return;
+            }
+            
             for (int i = 0; i < N; i++) {
                 final IPocketCallback callback = mCallbacks.get(i);
+                if (callback == null) {
+                    cleanup = true;
+                    continue;
+                }
+                
                 try {
-                    if (callback != null) {
-                        callback.onStateChanged(isDeviceInPocket(), PocketManager.REASON_SENSOR);
-                    } else {
-                        cleanup = true;
-                    }
+                    callback.onStateChanged(isInPocket, PocketManager.REASON_SENSOR);
+                } catch (DeadObjectException e) {
+                    Slog.w(TAG, "Client died while invoking sendPocketState: ", e);
+                    cleanup = true;
                 } catch (RemoteException e) {
+                    Slog.w(TAG, "Failed to invoke sendPocketState: ", e);
+                    cleanup = true;
+                } catch (Exception e) {
+                    Slog.e(TAG, "Unexpected error in dispatchCallbacks: ", e);
                     cleanup = true;
                 }
             }
+            
             if (cleanup) {
                 cleanUpCallbacksLocked(null);
             }
@@ -749,12 +829,34 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
             return;
         }
 
-        update();
+        if (interactive) {
+            // Device is interactive - immediately unregister all sensors
+            mHandler.removeCallbacksAndMessages(null);
+            unregisterSensorListeners();
+            // Reset state
+            mLastKnownPocketState = false;
+        } else {
+            // Device is non-interactive - register sensors if enabled
+            update();
+        }
+    }
+
+    private void handleSensorEventAndUpdateState() {
+        final boolean currentState = isDeviceInPocket();
+        
+        // Only dispatch if state actually changed
+        if (currentState != mLastKnownPocketState) {
+            mLastKnownPocketState = currentState;
+            dispatchCallbacks();
+        } else {
+            // State hasn't changed, no need to reconfigure sensors
+            if (DEBUG) {
+                Log.d(TAG, "State unchanged, skipping callback");
+            }
+        }
     }
 
     private void handleVendorSensorEvent(SensorEvent sensorEvent) {
-        final boolean isDeviceInPocket = isDeviceInPocket();
-
         mLastVendorSensorState = mVendorSensorState;
 
         if (DEBUG) {
@@ -782,15 +884,11 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
             Log.e(TAG, "Event: something went wrong, exception caught, e = " + e);
             mVendorSensorState = VENDOR_SENSOR_UNKNOWN;
         } finally {
-            if (isDeviceInPocket != isDeviceInPocket()) {
-                dispatchCallbacks();
-            }
+            handleSensorEventAndUpdateState();
         }
-   }
+    }
 
     private void handleLightSensorEvent(SensorEvent sensorEvent) {
-        final boolean isDeviceInPocket = isDeviceInPocket();
-
         mLastLightState = mLightState;
 
         if (DEBUG) {
@@ -820,15 +918,11 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
             Log.e(TAG, "Event: something went wrong, exception caught, e = " + e);
             mLightState = LIGHT_UNKNOWN;
         } finally {
-            if (isDeviceInPocket != isDeviceInPocket()) {
-                dispatchCallbacks();
-            }
+            handleSensorEventAndUpdateState();
         }
     }
 
     private void handleProximitySensorEvent(SensorEvent sensorEvent) {
-        final boolean isDeviceInPocket = isDeviceInPocket();
-
         mLastProximityState = mProximityState;
 
         if (DEBUG) {
@@ -857,15 +951,19 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
             Log.e(TAG, "Event: something went wrong, exception caught, e = " + e);
             mProximityState = PROXIMITY_UNKNOWN;
         } finally {
-            if (isDeviceInPocket != isDeviceInPocket()) {
-                dispatchCallbacks();
-            }
+            handleSensorEventAndUpdateState();
         }
     }
 
     private void handleUnregisterTimeout() {
+        if (DEBUG) {
+            Log.d(TAG, "Unregister timeout triggered");
+        }
         mHandler.removeCallbacksAndMessages(null);
         unregisterSensorListeners();
+        mLastKnownPocketState = false;
+        // Force state update
+        dispatchCallbacks();
     }
 
     private static Sensor getSensor(SensorManager sm, String type) {
@@ -879,13 +977,39 @@ public class PocketService extends SystemService implements IBinder.DeathRecipie
 
     private void dispatchCallbacks() {
         final boolean isDeviceInPocket = isDeviceInPocket();
+        final long now = SystemClock.uptimeMillis();
+        
+        // Debounce: don't dispatch callbacks more than once per second
+        if (now - mLastCallbackTime < MIN_CALLBACK_INTERVAL_MS) {
+            if (DEBUG) {
+                Log.d(TAG, "Debouncing callback, last was " + (now - mLastCallbackTime) + "ms ago");
+            }
+            mCallbackPending = true;
+            // Schedule a delayed dispatch
+            mHandler.removeMessages(PocketHandler.MSG_DISPATCH_CALLBACKS);
+            mHandler.sendEmptyMessageDelayed(PocketHandler.MSG_DISPATCH_CALLBACKS, 
+                    MIN_CALLBACK_INTERVAL_MS - (now - mLastCallbackTime));
+            return;
+        }
+        
+        mLastCallbackTime = now;
+        mCallbackPending = false;
+        
+        // Remove any pending timeouts
+        mHandler.removeMessages(PocketHandler.MSG_UNREGISTER_TIMEOUT);
+        
+        // Only unregister after being out of pocket for a while
         if (mInteractive) {
             if (!isDeviceInPocket) {
-                mHandler.sendEmptyMessageDelayed(PocketHandler.MSG_UNREGISTER_TIMEOUT, 5000 /* ms */);
-            } else {
-                mHandler.removeMessages(PocketHandler.MSG_UNREGISTER_TIMEOUT);
+                // Wait 5 seconds before unregistering to avoid flapping
+                mHandler.sendEmptyMessageDelayed(PocketHandler.MSG_UNREGISTER_TIMEOUT, 5000);
             }
+        } else {
+            // Set a timeout to prevent sensors from running forever
+            mHandler.sendEmptyMessageDelayed(PocketHandler.MSG_UNREGISTER_TIMEOUT, MAX_SENSOR_RUN_TIME);
         }
+        
+        // Send the actual callback
         mHandler.removeMessages(PocketHandler.MSG_DISPATCH_CALLBACKS);
         mHandler.sendEmptyMessage(PocketHandler.MSG_DISPATCH_CALLBACKS);
     }
