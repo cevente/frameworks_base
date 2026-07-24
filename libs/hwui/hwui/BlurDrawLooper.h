@@ -26,6 +26,9 @@ namespace android {
 
 class BlurDrawLooper : public SkRefCnt {
 public:
+    // SD685 safe limits
+    static constexpr float MAX_SAFE_SIGMA = 8.0f;
+    
     static sk_sp<BlurDrawLooper> Make(SkColor4f, SkColorSpace*, float blurSigma, SkPoint offset);
 
     ~BlurDrawLooper() override;
