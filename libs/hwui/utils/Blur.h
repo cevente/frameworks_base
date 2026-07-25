@@ -25,9 +25,10 @@ namespace uirenderer {
 
 class Blur {
 public:
-    // SD685 safe limits - prevent CPU overload in software rendering
-    static constexpr float MAX_SAFE_RADIUS = 15.0f;
-    static constexpr float MAX_SAFE_SIGMA = 8.0f;
+    // SD685 optimized limits - now safe with Stack Blur O(1) algorithm
+    // Higher values produce the ultra-clean industrial frosted glass effect
+    static constexpr float MAX_SAFE_RADIUS = 40.0f;   // Now safe with O(1) algorithm
+    static constexpr float MAX_SAFE_SIGMA = 25.0f;    // Corresponding sigma
     
     // If radius > 0, return the corresponding sigma, else return 0
     static float convertRadiusToSigma(float radius);
@@ -50,10 +51,18 @@ public:
     }
 
     static void generateGaussianWeights(float* weights, float radius);
+    
+    // Optimized Stack Blur implementations - O(1) per pixel
     static void horizontal(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
                            int32_t width, int32_t height);
     static void vertical(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
                          int32_t width, int32_t height);
+    
+    // Legacy Gaussian blur (kept for reference, not used)
+    static void horizontalGaussian(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
+                                   int32_t width, int32_t height);
+    static void verticalGaussian(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
+                                 int32_t width, int32_t height);
 };
 
 }  // namespace uirenderer
