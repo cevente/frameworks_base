@@ -26,8 +26,9 @@ namespace android {
 
 class BlurDrawLooper : public SkRefCnt {
 public:
-    // SD685 safe limits
-    static constexpr float MAX_SAFE_SIGMA = 8.0f;
+    // SD685 optimized limits - now safe with Stack Blur O(1) algorithm
+    // Higher values produce the ultra-clean industrial frosted glass effect
+    static constexpr float MAX_SAFE_SIGMA = 25.0f;  // Equivalent to ~40px radius
     
     static sk_sp<BlurDrawLooper> Make(SkColor4f, SkColorSpace*, float blurSigma, SkPoint offset);
 
