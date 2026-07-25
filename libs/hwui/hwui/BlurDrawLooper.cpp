@@ -21,17 +21,11 @@
 #include <algorithm>
 #include <utils/Log.h>
 
-#define LOG_NDEBUG 0  // Enable logging in debug builds
-
-#ifndef ALOGV_IF
-#define ALOGV_IF(...) ((void)0)
-#endif
-
 namespace android {
 
 BlurDrawLooper::BlurDrawLooper(SkColor4f color, float blurSigma, SkPoint offset)
         : mColor(color), 
-          mBlurSigma(std::min(blurSigma, MAX_SAFE_SIGMA)),  // Cap at construction
+          mBlurSigma(std::min(blurSigma, MAX_SAFE_SIGMA)),
           mOffset(offset) {
     if (blurSigma > MAX_SAFE_SIGMA) {
         ALOGD("BlurDrawLooper: Capping blur sigma: %.2f -> %.2f (max: %.2f)", 
@@ -44,9 +38,7 @@ BlurDrawLooper::~BlurDrawLooper() = default;
 SkPoint BlurDrawLooper::apply(Paint* paint) const {
     paint->setColor(mColor);
     
-    // Use the already-capped mBlurSigma
     if (mBlurSigma > 0) {
-        // Double-check we don't exceed the limit (defensive programming)
         float safeSigma = std::min(mBlurSigma, MAX_SAFE_SIGMA);
         paint->setMaskFilter(SkMaskFilter::MakeBlur(kNormal_SkBlurStyle, safeSigma, true));
     }
@@ -57,11 +49,10 @@ sk_sp<BlurDrawLooper> BlurDrawLooper::Make(SkColor4f color, SkColorSpace* cs, fl
                                            SkPoint offset) {
     if (cs) {
         SkPaint tmp;
-        tmp.setColor(color, cs);  // converts color to sRGB
+        tmp.setColor(color, cs);
         color = tmp.getColor4f();
     }
     
-    // Apply cap during construction
     float cappedSigma = std::min(blurSigma, MAX_SAFE_SIGMA);
     if (blurSigma > MAX_SAFE_SIGMA) {
         ALOGD("BlurDrawLooper::Make(): Capping blur sigma: %.2f -> %.2f", blurSigma, cappedSigma);
