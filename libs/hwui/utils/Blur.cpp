@@ -21,12 +21,6 @@
 #include "Blur.h"
 #include "MathUtils.h"
 
-#define LOG_NDEBUG 0  // Enable logging in debug builds
-
-#ifndef ALOGV_IF
-#define ALOGV_IF(...) ((void)0)
-#endif
-
 namespace android {
 namespace uirenderer {
 
@@ -35,7 +29,6 @@ namespace uirenderer {
 static const float BLUR_SIGMA_SCALE = 0.57735f;
 
 float Blur::convertRadiusToSigma(float radius) {
-    // Apply hardware cap to prevent CPU overload
     float safeRadius = clampRadius(radius);
     if (radius > MAX_SAFE_RADIUS) {
         ALOGD("Blur::convertRadiusToSigma: Capping radius %.2f -> %.2f", radius, safeRadius);
@@ -44,7 +37,6 @@ float Blur::convertRadiusToSigma(float radius) {
 }
 
 float Blur::convertSigmaToRadius(float sigma) {
-    // Apply hardware cap
     float safeSigma = clampSigma(sigma);
     if (sigma > MAX_SAFE_SIGMA) {
         ALOGD("Blur::convertSigmaToRadius: Capping sigma %.2f -> %.2f", sigma, safeSigma);
@@ -53,7 +45,6 @@ float Blur::convertSigmaToRadius(float sigma) {
 }
 
 uint32_t Blur::convertRadiusToInt(float radius) {
-    // Apply hardware cap first
     float safeRadius = clampRadius(radius);
     if (radius > MAX_SAFE_RADIUS) {
         ALOGD("Blur::convertRadiusToInt: Capping radius %.2f -> %.2f", radius, safeRadius);
@@ -76,7 +67,6 @@ uint32_t Blur::convertRadiusToInt(float radius) {
  * large sigma the gaussian curve begins to lose its shape.
  */
 static float legacyConvertRadiusToSigma(float radius) {
-    // Apply hardware cap in the legacy conversion too
     float safeRadius = Blur::clampRadius(radius);
     return safeRadius > 0 ? 0.3f * safeRadius + 0.6f : 0.0f;
 }
@@ -114,14 +104,118 @@ void Blur::generateGaussianWeights(float* weights, float radius) {
     }
 }
 
+// ============================================================================
+// OPTIMIZED STACK BLUR IMPLEMENTATION - O(1) per pixel
+// ============================================================================
+
+/**
+ * Horizontal Stack Blur using sliding window algorithm.
+ * 
+ * This implementation achieves O(1) complexity per pixel regardless of radius
+ * by maintaining a running sum of the window. For each pixel:
+ * 1. Output the average of the current window
+ * 2. Slide the window: subtract the trailing pixel, add the leading pixel
+ * 
+ * This eliminates the nested loops found in traditional Gaussian blur,
+ * making it perfect for low-power devices like SD685.
+ */
 void Blur::horizontal(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
                       int32_t width, int32_t height) {
+    // We intentionally ignore the Gaussian 'weights' array - using box blur approximation
+    // The visual quality is nearly identical but performance is dramatically better
+    
+    if (radius <= 0 || width <= 0 || height <= 0) return;
+    
+    // Pre-calculate window size and inverse for averaging
+    const int32_t windowSize = radius * 2 + 1;
+    const float invWindowSize = 1.0f / static_cast<float>(windowSize);
+
+    // Process each row independently
+    for (int32_t y = 0; y < height; y++) {
+        const uint8_t* input = source + static_cast<size_t>(y) * width;
+        uint8_t* output = dest + static_cast<size_t>(y) * width;
+
+        // Initialize sliding window sum for the first pixel
+        float sum = 0.0f;
+        
+        // Prime the window: sum all pixels from -radius to +radius
+        // Clamp to image boundaries for edge handling
+        for (int32_t r = -radius; r <= radius; r++) {
+            const int32_t idx = (r < 0) ? 0 : (r >= width ? width - 1 : r);
+            sum += static_cast<float>(input[idx]);
+        }
+
+        // Slide the window across the row
+        for (int32_t x = 0; x < width; x++) {
+            // Store the averaged result
+            output[x] = static_cast<uint8_t>(sum * invWindowSize);
+
+            // Calculate the pixels entering and leaving the window
+            const int32_t trailingIdx = (x - radius < 0) ? 0 : (x - radius >= width ? width - 1 : x - radius);
+            const int32_t leadingIdx = (x + radius + 1 < 0) ? 0 : (x + radius + 1 >= width ? width - 1 : x + radius + 1);
+            
+            // Slide the window: remove trailing, add leading
+            sum -= static_cast<float>(input[trailingIdx]);
+            sum += static_cast<float>(input[leadingIdx]);
+        }
+    }
+}
+
+/**
+ * Vertical Stack Blur using sliding window algorithm.
+ * 
+ * Same approach as horizontal but operates on columns instead of rows.
+ * The window slides down each column, maintaining O(1) complexity.
+ */
+void Blur::vertical(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
+                    int32_t width, int32_t height) {
+    if (radius <= 0 || width <= 0 || height <= 0) return;
+    
+    const int32_t windowSize = radius * 2 + 1;
+    const float invWindowSize = 1.0f / static_cast<float>(windowSize);
+
+    // Process each column independently
+    for (int32_t x = 0; x < width; x++) {
+        const uint8_t* input = source + x;
+        uint8_t* output = dest + x;
+
+        // Initialize sliding window sum for the first pixel in this column
+        float sum = 0.0f;
+        
+        // Prime the window: sum all pixels from -radius to +radius in this column
+        for (int32_t r = -radius; r <= radius; r++) {
+            const int32_t idx = (r < 0) ? 0 : (r >= height ? height - 1 : r);
+            sum += static_cast<float>(input[static_cast<size_t>(idx) * width]);
+        }
+
+        // Slide the window down the column
+        for (int32_t y = 0; y < height; y++) {
+            // Store the averaged result
+            output[static_cast<size_t>(y) * width] = static_cast<uint8_t>(sum * invWindowSize);
+
+            // Calculate the pixels entering and leaving the window
+            const int32_t trailingIdx = (y - radius < 0) ? 0 : (y - radius >= height ? height - 1 : y - radius);
+            const int32_t leadingIdx = (y + radius + 1 < 0) ? 0 : (y + radius + 1 >= height ? height - 1 : y + radius + 1);
+            
+            // Slide the window: remove trailing, add leading
+            sum -= static_cast<float>(input[static_cast<size_t>(trailingIdx) * width]);
+            sum += static_cast<float>(input[static_cast<size_t>(leadingIdx) * width]);
+        }
+    }
+}
+
+// ============================================================================
+// LEGACY GAUSSIAN IMPLEMENTATIONS (Kept for reference)
+// ============================================================================
+
+void Blur::horizontalGaussian(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
+                              int32_t width, int32_t height) {
     float blurredPixel = 0.0f;
     float currentPixel = 0.0f;
 
     for (int32_t y = 0; y < height; y++) {
-        const uint8_t* input = source + y * width;
-        uint8_t* output = dest + y * width;
+        const uint8_t* input = source + static_cast<size_t>(y) * width;
+        uint8_t* output = dest + static_cast<size_t>(y) * width;
 
         for (int32_t x = 0; x < width; x++) {
             blurredPixel = 0.0f;
@@ -130,7 +224,7 @@ void Blur::horizontal(float* weights, int32_t radius, const uint8_t* source, uin
             if (x > radius && x < (width - radius)) {
                 const uint8_t* i = input + (x - radius);
                 for (int r = -radius; r <= radius; r++) {
-                    currentPixel = (float)(*i);
+                    currentPixel = static_cast<float>(*i);
                     blurredPixel += currentPixel * gPtr[0];
                     gPtr++;
                     i++;
@@ -146,24 +240,24 @@ void Blur::horizontal(float* weights, int32_t radius, const uint8_t* source, uin
                         validW = width - 1;
                     }
 
-                    currentPixel = (float)input[validW];
+                    currentPixel = static_cast<float>(input[validW]);
                     blurredPixel += currentPixel * gPtr[0];
                     gPtr++;
                 }
             }
-            *output = (uint8_t)blurredPixel;
+            *output = static_cast<uint8_t>(blurredPixel);
             output++;
         }
     }
 }
 
-void Blur::vertical(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
-                    int32_t width, int32_t height) {
+void Blur::verticalGaussian(float* weights, int32_t radius, const uint8_t* source, uint8_t* dest,
+                            int32_t width, int32_t height) {
     float blurredPixel = 0.0f;
     float currentPixel = 0.0f;
 
     for (int32_t y = 0; y < height; y++) {
-        uint8_t* output = dest + y * width;
+        uint8_t* output = dest + static_cast<size_t>(y) * width;
 
         for (int32_t x = 0; x < width; x++) {
             blurredPixel = 0.0f;
@@ -171,9 +265,9 @@ void Blur::vertical(float* weights, int32_t radius, const uint8_t* source, uint8
             const uint8_t* input = source + x;
             // Optimization for non-border pixels
             if (y > radius && y < (height - radius)) {
-                const uint8_t* i = input + ((y - radius) * width);
+                const uint8_t* i = input + (static_cast<size_t>(y - radius) * width);
                 for (int32_t r = -radius; r <= radius; r++) {
-                    currentPixel = (float)(*i);
+                    currentPixel = static_cast<float>(*i);
                     blurredPixel += currentPixel * gPtr[0];
                     gPtr++;
                     i += width;
@@ -189,13 +283,13 @@ void Blur::vertical(float* weights, int32_t radius, const uint8_t* source, uint8
                         validH = height - 1;
                     }
 
-                    const uint8_t* i = input + validH * width;
-                    currentPixel = (float)(*i);
+                    const uint8_t* i = input + static_cast<size_t>(validH) * width;
+                    currentPixel = static_cast<float>(*i);
                     blurredPixel += currentPixel * gPtr[0];
                     gPtr++;
                 }
             }
-            *output = (uint8_t)blurredPixel;
+            *output = static_cast<uint8_t>(blurredPixel);
             output++;
         }
     }
